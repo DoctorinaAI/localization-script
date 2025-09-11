@@ -9,7 +9,7 @@ const DEFAULTS = {
   API_URL: '',
   API_KEY: '',
   OVERWRITE: 'false',
-  TIMEOUT_MS: '60000'
+  TIMEOUT_MS: '360000'
 };
 
 /** ===================== MENU ===================== **/
