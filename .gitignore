@@ -1,0 +1,12 @@
+node_modules/
+*.log
+npm-debug.log*
+.DS_Store
+.vscode/
+
+# Clasp auth (stored in user home; keep it out of git)
+.clasprc.json
+
+# Build artifacts
+/dist/
+/build/
