@@ -1,6 +1,6 @@
 const DEFAULTS = {
-  API_URL: "",
-  API_KEY: "",
+  API_URL: "", // Add this url to Script Properties
+  API_KEY: "", // Add this API key to Script Properties
   OVERWRITE: "false",
   TIMEOUT_MS: "360000",
   BATCH_SIZE: "3",
