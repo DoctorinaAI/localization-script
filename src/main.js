@@ -48,7 +48,7 @@ function runLocalization() {
   const effectiveCount = detectEffectiveDataRowCount(rows, idx.label);
   const rowsEffective = rows.slice(0, effectiveCount);
 
-  // Собираем батч ЗАПРОСОВ и карту соответствий для записи
+  // Build request batch and mapping for write-back
   const batch = [];
   const byLabel = new Map(); // label -> { uiRow, requestedCodes:Set, targets:[{code, colIndex}] }
   const seenLabels = new Set();
@@ -199,7 +199,7 @@ function detectEffectiveDataRowCount(rows, labelColIndex) {
   for (let i = 0; i < rows.length; i++) {
     const label = rows[i][labelColIndex];
     if (!label || String(label).trim() === '') {
-      return i; // до пустоты
+  return i; // until first empty label
     }
   }
   return rows.length;
@@ -454,6 +454,12 @@ function rgbToHex(rgb) {
   return `#${toHex(rgb.r)}${toHex(rgb.g)}${toHex(rgb.b)}`.toLowerCase();
 }
 
+/** ===================== FORMULA HELPERS ===================== **/
+function isGoogleTranslateFormula(f) {
+  if (!f) return false;
+  return /(^|[^A-Z])GOOGLETRANSLATE\s*\(/i.test(f);
+}
+
 /** ===================== STATUS ===================== **/
 
 function setStatus(config, text) {
@@ -550,7 +556,7 @@ function freezeGoogleTranslateFormulas() {
   const idx = indexHeader(header);
   const langsAll = detectLanguageColumns(header, idx.afterEnCol);
   if (langsAll.length === 0) {
-  SpreadsheetApp.getActive().toast("No language columns", "Freeze", 5);
+    SpreadsheetApp.getActive().toast("No language columns", "Freeze", 5);
     return;
   }
   const dataRows = values.slice(1);
@@ -562,25 +568,15 @@ function freezeGoogleTranslateFormulas() {
     const rng = sheet.getRange(2, col, numRows, 1);
     const formulas = rng.getFormulas();
     const vals = rng.getValues();
-    const outValues = new Array(numRows);
-    const outFormulas = new Array(numRows);
     for (let i = 0; i < numRows; i++) {
       const f = formulas[i][0];
-      if (f && /GOOGLETRANSLATE/i.test(f)) {
-        outValues[i] = [vals[i][0]]; // freeze value
-        outFormulas[i] = [""]; // remove formula
+      if (isGoogleTranslateFormula(f)) {
+        const displayVal = vals[i][0];
+        const cell = sheet.getRange(i + 2, col);
+        cell.setValue(displayVal);
         frozen++;
-      } else if (f) {
-        // preserve other formulas untouched
-        outValues[i] = [""];
-        outFormulas[i] = [f];
-      } else {
-        outValues[i] = [vals[i][0]];
-        outFormulas[i] = [""];
       }
     }
-    rng.setValues(outValues);
-    rng.setFormulas(outFormulas); // reapply non-translate formulas
   }
   SpreadsheetApp.getActive().toast(`Frozen ${frozen} formulas`, "Freeze", 6);
 }
@@ -594,7 +590,7 @@ function clearGoogleTranslateFormulas() {
   const idx = indexHeader(header);
   const langsAll = detectLanguageColumns(header, idx.afterEnCol);
   if (langsAll.length === 0) {
-  SpreadsheetApp.getActive().toast("No language columns", "Clear", 5);
+    SpreadsheetApp.getActive().toast("No language columns", "Clear", 5);
     return;
   }
   const dataRows = values.slice(1);
@@ -605,32 +601,16 @@ function clearGoogleTranslateFormulas() {
     const col = l.colIndex + 1;
     const rng = sheet.getRange(2, col, numRows, 1);
     const formulas = rng.getFormulas();
-    const vals = rng.getValues();
-    const outValues = new Array(numRows);
-    const outFormulas = new Array(numRows);
     for (let i = 0; i < numRows; i++) {
       const f = formulas[i][0];
-      if (f && /GOOGLETRANSLATE/i.test(f)) {
-        outValues[i] = [""]; // clear only translate formulas
-        outFormulas[i] = [""];
+      if (isGoogleTranslateFormula(f)) {
+        const cell = sheet.getRange(i + 2, col);
+        cell.clearContent(); // clear only that single cell
         cleared++;
-      } else if (f) {
-        // keep other formulas
-        outValues[i] = [""];
-        outFormulas[i] = [f];
-      } else {
-        outValues[i] = [vals[i][0]];
-        outFormulas[i] = [""];
       }
     }
-    rng.setValues(outValues);
-    rng.setFormulas(outFormulas);
   }
-  SpreadsheetApp.getActive().toast(
-    `Cleared ${cleared} GOOGLETRANSLATE formulas`,
-    "Clear",
-    6
-  );
+  SpreadsheetApp.getActive().toast(`Cleared ${cleared} GOOGLETRANSLATE formulas`, "Clear", 6);
 }
 
 function clearLocalizationHighlight() {
