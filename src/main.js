@@ -15,7 +15,7 @@ const DEFAULTS = {
 function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu("Localization")
-    .addItem("Run", "runLocalization")
+    .addItem("Translate all empty cells", "runLocalization")
     .addSeparator()
     .addItem("Fill GOOGLETRANSLATE formulas", "fillGoogleTranslateFormulas")
     .addItem("Freeze GOOGLETRANSLATE formulas", "freezeGoogleTranslateFormulas")
@@ -30,30 +30,32 @@ function runLocalization() {
   const started = new Date();
   const { sheet, values } = readActiveSheet();
   if (!values || values.length < 2)
-    throw new Error("Лист пустой или нет данных.");
+    throw new Error("Sheet is empty or has no data.");
 
   const config = getConfig();
   if (!config.API_URL && !config.dryRun)
-    throw new Error("Не задан API_URL в Script Properties.");
+    throw new Error("API_URL is not set in Script Properties.");
 
   const header = values[0].map((h) => String(h || "").trim());
   const idx = indexHeader(header);
 
   const langsAll = detectLanguageColumns(header, idx.afterEnCol);
   if (langsAll.length === 0)
-    throw new Error('Не найдено ни одной языковой колонки после "en".');
+    throw new Error('No language columns found after "en".');
 
-  const rows = values.slice(1); // без заголовка
-  const uiOffset = 1; // сдвиг для 1-based
+  const rows = values.slice(1); // without header
+  const uiOffset = 1; // shift for 1-based index
+  const effectiveCount = detectEffectiveDataRowCount(rows, idx.label);
+  const rowsEffective = rows.slice(0, effectiveCount);
 
   // Собираем батч ЗАПРОСОВ и карту соответствий для записи
   const batch = [];
   const byLabel = new Map(); // label -> { uiRow, requestedCodes:Set, targets:[{code, colIndex}] }
   const seenLabels = new Set();
 
-  for (let r = 0; r < rows.length; r++) {
+  for (let r = 0; r < rowsEffective.length; r++) {
     const uiRow = r + 1 + uiOffset;
-    const row = rows[r];
+    const row = rowsEffective[r];
 
     const label = safeStr(row[idx.label]);
     const description = safeStr(row[idx.description]);
@@ -63,14 +65,14 @@ function runLocalization() {
     if (!label || !en) continue;
 
     if (seenLabels.has(label)) {
-      setRowNote(uiRow, 1, `Дублирующийся label: "${label}". Уникализируй.`);
+      setRowNote(uiRow, 1, `Duplicate label: "${label}". Must be unique.`);
       throw new Error(
-        `Найден дублирующийся label: "${label}" (строка ${uiRow}).`
+        `Duplicate label found: "${label}" (row ${uiRow}).`
       );
     }
     seenLabels.add(label);
 
-    // Теперь даже при OVERWRITE=true запрашиваем ТОЛЬКО пустые ячейки, чтобы не палить квоты
+  // Even with OVERWRITE=true request ONLY empty cells to avoid wasting quota
     const targets = pickEmptyTargetsForRow(sheet, uiRow, langsAll);
     if (targets.codes.length === 0) continue;
 
@@ -90,22 +92,22 @@ function runLocalization() {
   }
 
   if (batch.length === 0) {
-    setStatus(config, "Нет пустых ячеек");
+    setStatus(config, "No empty cells");
     SpreadsheetApp.getActive().toast(
-      "Нет ячеек для локализации. Готово.",
+      "No cells need localization. Done.",
       "OK",
       5
     );
     return;
   }
 
-  // Разбиваем на батчи по config.batchSize
+  // Split into batches by config.batchSize
   const allData = [];
   const batchesTotal = Math.ceil(batch.length / config.batchSize);
   for (let i = 0; i < batch.length; i += config.batchSize) {
     const slice = batch.slice(i, i + config.batchSize);
     const batchNum = Math.floor(i / config.batchSize) + 1;
-    setStatus(config, `Батч ${batchNum}/${batchesTotal}`);
+  setStatus(config, `Batch ${batchNum}/${batchesTotal}`);
     let resp;
     if (config.dryRun) {
       resp = {
@@ -129,8 +131,8 @@ function runLocalization() {
   }
   const data = allData;
 
-  // Готовим буферы для пакетной записи по колонкам
-  const numRows = rows.length;
+  // Prepare column write buffers
+  const numRows = rowsEffective.length;
   const buffers = Object.fromEntries(
     langsAll.map((l) => [l.code, new Array(numRows).fill(null)])
   );
@@ -172,7 +174,7 @@ function indexHeader(header) {
   for (const k of req) {
     const pos = header.findIndex((h) => h.toLowerCase() === k);
     if (pos < 0)
-      throw new Error(`В заголовке отсутствует обязательная колонка: "${k}".`);
+      throw new Error(`Required header column is missing: "${k}".`);
     map[k] = pos;
   }
   map.afterEnCol = map.en + 1;
@@ -190,6 +192,17 @@ function detectLanguageColumns(header, startFrom) {
     result.push({ code, colIndex: c, header: raw });
   }
   return result;
+}
+
+// Determine actual number of data rows until the first empty label.
+function detectEffectiveDataRowCount(rows, labelColIndex) {
+  for (let i = 0; i < rows.length; i++) {
+    const label = rows[i][labelColIndex];
+    if (!label || String(label).trim() === '') {
+      return i; // до пустоты
+    }
+  }
+  return rows.length;
 }
 
 function normalizeLangCode(raw) {
@@ -211,12 +224,11 @@ function parseMetaAllowEmpty(cell, uiRow) {
     return JSON.parse(s);
   } catch (_e) {
     setRowNote(uiRow, 3, `meta: invalid JSON`);
-    throw new Error(`Строка ${uiRow}: meta некорректный JSON.`);
+    throw new Error(`Row ${uiRow}: meta invalid JSON.`);
   }
 }
 
-// Берем только пустые target-ячейки, чтобы не дёргать API лишний раз,
-// в том числе при OVERWRITE=true.
+// Collect only empty target cells (even if OVERWRITE=true) to avoid extra API calls.
 function pickEmptyTargetsForRow(sheet, uiRow, langsAll) {
   const codes = [];
   const targets = [];
@@ -310,7 +322,7 @@ function callApiBatch(config, payload) {
   try {
     data = JSON.parse(resp.getContentText());
   } catch (_e) {
-    throw new Error("API вернул не-JSON ответ.");
+  throw new Error("API returned non-JSON response.");
   }
   return data;
 }
@@ -334,7 +346,7 @@ function callApiBatchWithRetry(config, payload) {
 
 function validateBatchResponse(resp, byLabel, ctx) {
   if (!resp || typeof resp !== "object" || !Array.isArray(resp.data)) {
-    throw new Error(`В ответе отсутствует массив "data".`);
+  throw new Error(`Response object missing array \"data\".`);
   }
 
   const normalized = [];
@@ -344,7 +356,7 @@ function validateBatchResponse(resp, byLabel, ctx) {
     const label = safeStr(item.label);
     if (!label) continue;
     if (serverByLabel.has(label)) {
-      throw new Error(`Ответ содержит дубликат label "${label}".`);
+    throw new Error(`Response contains duplicate label "${label}".`);
     }
     serverByLabel.set(label, item);
   }
@@ -353,7 +365,7 @@ function validateBatchResponse(resp, byLabel, ctx) {
     const got = serverByLabel.get(label);
     if (!got) continue; // может быть в другом батче
     if (!got.localization || typeof got.localization !== "object") {
-      throw new Error(`label "${label}": отсутствует объект "localization".`);
+      throw new Error(`label "${label}": missing \"localization\" object.`);
     }
     const outLoc = {};
     const missing = [];
@@ -375,9 +387,9 @@ function validateBatchResponse(resp, byLabel, ctx) {
       if (!outLoc[code]) missing.push(code);
     }
     if (missing.length) {
-      setRowNote(meta.uiRow, 1, `Отсутствуют языки: ${missing.join(", ")}`);
+      setRowNote(meta.uiRow, 1, `Missing languages: ${missing.join(", ")}`);
       throw new Error(
-        `label "${label}": API не вернул переводы для: ${missing.join(", ")}`
+        `label "${label}": API did not return translations for: ${missing.join(", ")}`
       );
     }
     normalized.push({ label, localization: outLoc, uiRow: meta.uiRow });
@@ -472,21 +484,23 @@ function setRowNote(uiRow, uiColOrNull, message) {
 function fillGoogleTranslateFormulas() {
   const { sheet, values } = readActiveSheet();
   if (!values || values.length < 2)
-    throw new Error("Лист пустой или нет данных.");
+    throw new Error("Sheet is empty or has no data.");
 
   const header = values[0].map((h) => String(h || "").trim());
   const idx = indexHeader(header);
   const langsAll = detectLanguageColumns(header, idx.afterEnCol);
   if (langsAll.length === 0) {
     SpreadsheetApp.getActive().toast(
-      "Нет языковых колонок после EN",
+      "No language columns after EN",
       "Auto Translate",
       5
     );
     return;
   }
 
-  const numRows = values.length - 1; // без заголовка
+  const dataRows = values.slice(1);
+  const effectiveCount = detectEffectiveDataRowCount(dataRows, idx.label);
+  const numRows = effectiveCount; // ограничиваемся фактическими строками
   const enColLetter = columnToLetter(idx.en + 1);
   let inserted = 0;
 
@@ -496,7 +510,7 @@ function fillGoogleTranslateFormulas() {
     const vals = rng.getValues();
     const formulasExisting = rng.getFormulas();
     const targetCode = l.code.split(/[_-]/)[0]; // ru_RU -> ru
-    for (let i = 0; i < numRows; i++) {
+  for (let i = 0; i < numRows; i++) {
       const existingFormula = formulasExisting[i][0];
       if (existingFormula) continue; // уже формула
       const v = safeStr(vals[i][0]);
@@ -531,15 +545,17 @@ function columnToLetter(col) {
 function freezeGoogleTranslateFormulas() {
   const { sheet, values } = readActiveSheet();
   if (!values || values.length < 2)
-    throw new Error("Лист пустой или нет данных.");
+    throw new Error("Sheet is empty or has no data.");
   const header = values[0].map((h) => String(h || "").trim());
   const idx = indexHeader(header);
   const langsAll = detectLanguageColumns(header, idx.afterEnCol);
   if (langsAll.length === 0) {
-    SpreadsheetApp.getActive().toast("Нет языковых колонок", "Freeze", 5);
+  SpreadsheetApp.getActive().toast("No language columns", "Freeze", 5);
     return;
   }
-  const numRows = values.length - 1;
+  const dataRows = values.slice(1);
+  const effectiveCount = detectEffectiveDataRowCount(dataRows, idx.label);
+  const numRows = effectiveCount;
   let frozen = 0;
   for (const l of langsAll) {
     const col = l.colIndex + 1;
@@ -573,15 +589,17 @@ function freezeGoogleTranslateFormulas() {
 function clearGoogleTranslateFormulas() {
   const { sheet, values } = readActiveSheet();
   if (!values || values.length < 2)
-    throw new Error("Лист пустой или нет данных.");
+    throw new Error("Sheet is empty or has no data.");
   const header = values[0].map((h) => String(h || "").trim());
   const idx = indexHeader(header);
   const langsAll = detectLanguageColumns(header, idx.afterEnCol);
   if (langsAll.length === 0) {
-    SpreadsheetApp.getActive().toast("Нет языковых колонок", "Clear", 5);
+  SpreadsheetApp.getActive().toast("No language columns", "Clear", 5);
     return;
   }
-  const numRows = values.length - 1;
+  const dataRows = values.slice(1);
+  const effectiveCount = detectEffectiveDataRowCount(dataRows, idx.label);
+  const numRows = effectiveCount;
   let cleared = 0;
   for (const l of langsAll) {
     const col = l.colIndex + 1;
@@ -633,7 +651,9 @@ function clearLocalizationHighlight() {
   const idx = indexHeader(header);
   const langsAll = detectLanguageColumns(header, idx.afterEnCol);
   if (!langsAll.length) return;
-  const numRows = values.length - 1;
+  const dataRows = values.slice(1);
+  const effectiveCount = detectEffectiveDataRowCount(dataRows, idx.label);
+  const numRows = effectiveCount;
   let clearedAny = 0;
   for (const l of langsAll) {
     const col = l.colIndex + 1;
