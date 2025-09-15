@@ -1,15 +1,33 @@
 /** ===================== CONFIG (Script Properties override these) ===================== **
- *   API_URL   : https://your.endpoint/translate
- *   API_KEY   : <optional bearer or custom token>
- *   OVERWRITE : "true" | "false"  (default: false)
- *   TIMEOUT_MS: integer ms (default: 60000)
+ *   API_URL    : https://your.endpoint/translate
+ *   API_KEY    : <optional bearer or custom token>
+ *   OVERWRITE  : "true" | "false"  (legacy; now only empty cells are filled)
+ *   TIMEOUT_MS : integer ms (default: 60000)
+ *   BATCH_SIZE : integer (max rows per API request, default: 3)
+ *
+ *   Формат запроса: { batch: [ { label, description, meta, en, languages:["es","de"] }, ... ] }
+ *   Формат ответа (один объект на язык):
+ *     {
+ *       "data": [
+ *         {
+ *           "label": "myButton",
+ *           "localization": {
+ *             "ru": { "text": "Моя Кнопка" },
+ *             "es": { "text": "Mi Botón" }
+ *           }
+ *         }
+ *       ]
+ *     }
+ *   Также допустим упрощённый ответ: localization[code] = "строка".
+ *   Скрипт выбирает localization[code].text если объект, иначе значение как строку.
  */
 
 const DEFAULTS = {
   API_URL: '',
   API_KEY: '',
   OVERWRITE: 'false',
-  TIMEOUT_MS: '360000'
+  TIMEOUT_MS: '360000',
+  BATCH_SIZE: '3'
 };
 
 /** ===================== MENU ===================== **/
@@ -79,11 +97,15 @@ function runLocalization() {
     return;
   }
 
-  // Один батч-запрос
-  const resp = callApiBatch(config, { batch });
-
-  // Валидация ответа и подготовка данных к записи
-  const data = validateBatchResponse(resp, byLabel);
+  // Разбиваем на батчи по config.batchSize
+  const allData = [];
+  for (let i = 0; i < batch.length; i += config.batchSize) {
+    const slice = batch.slice(i, i + config.batchSize);
+    const resp = callApiBatch(config, { batch: slice });
+    const dataPart = validateBatchResponse(resp, byLabel, { slice });
+    allData.push(...dataPart);
+  }
+  const data = allData;
 
   // Готовим буферы для пакетной записи по колонкам
   const numRows = rows.length;
@@ -91,10 +113,16 @@ function runLocalization() {
 
   for (const item of data) {
     const info = byLabel.get(item.label);
+    if (!info) continue;
     const loc = item.localization || {};
     for (const code of info.requestedCodes) {
-      const text = safeStr(loc[code]);
-      // Проверено в validateBatchResponse: все обязательные коды присутствуют
+      const val = loc[code];
+      let text = '';
+      if (val && typeof val === 'object' && typeof val.text !== 'undefined') {
+        text = safeStr(val.text);
+      } else {
+        text = safeStr(val);
+      }
       buffers[code][info.uiRow - 1 - uiOffset] = text;
     }
   }
@@ -177,10 +205,12 @@ function getConfig() {
   const API_KEY = props.getProperty('API_KEY') || DEFAULTS.API_KEY;
   const OVERWRITE = (props.getProperty('OVERWRITE') || DEFAULTS.OVERWRITE).toLowerCase() === 'true';
   const TIMEOUT_MS = parseInt(props.getProperty('TIMEOUT_MS') || DEFAULTS.TIMEOUT_MS, 10);
+  const BATCH_SIZE = parseInt(props.getProperty('BATCH_SIZE') || DEFAULTS.BATCH_SIZE, 10);
 
   // OVERWRITE оставляем для совместимости, но теперь оно не влияет на выбор целей:
   // мы ВСЕГДА запрашиваем только пустые ячейки.
-  return { API_URL, API_KEY, overwrite: OVERWRITE, timeout: isFinite(TIMEOUT_MS) ? TIMEOUT_MS : 60000 };
+  const batchSize = isFinite(BATCH_SIZE) && BATCH_SIZE > 0 ? BATCH_SIZE : 3;
+  return { API_URL, API_KEY, overwrite: OVERWRITE, timeout: isFinite(TIMEOUT_MS) ? TIMEOUT_MS : 60000, batchSize };
 }
 
 function callApiBatch(config, payload) {
@@ -215,12 +245,12 @@ function callApiBatch(config, payload) {
   return data;
 }
 
-function validateBatchResponse(resp, byLabel) {
+function validateBatchResponse(resp, byLabel, ctx) {
   if (!resp || typeof resp !== 'object' || !Array.isArray(resp.data)) {
     throw new Error(`В ответе отсутствует массив "data".`);
   }
 
-  // Быстрый индекс по label
+  const normalized = [];
   const serverByLabel = new Map();
   for (const item of resp.data) {
     if (!item || typeof item !== 'object') continue;
@@ -232,27 +262,35 @@ function validateBatchResponse(resp, byLabel) {
     serverByLabel.set(label, item);
   }
 
-  // Проверяем, что для каждого запрошенного label пришли все нужные языки
   for (const [label, meta] of byLabel.entries()) {
     const got = serverByLabel.get(label);
-    if (!got) {
-      throw new Error(`Ответ не содержит объект для label "${label}" (строка ${meta.uiRow}).`);
-    }
+    if (!got) continue; // может быть в другом батче
     if (!got.localization || typeof got.localization !== 'object') {
       throw new Error(`label "${label}": отсутствует объект "localization".`);
     }
+    const outLoc = {};
     const missing = [];
     for (const code of meta.requestedCodes) {
-      const v = got.localization[code];
-      if (v == null || String(v).trim() === '') missing.push(code);
+      const rawVal = got.localization[code];
+      if (rawVal == null) {
+        missing.push(code);
+        continue;
+      }
+      if (rawVal && typeof rawVal === 'object' && typeof rawVal.text !== 'undefined') {
+        outLoc[code] = safeStr(rawVal.text);
+      } else {
+        outLoc[code] = safeStr(rawVal);
+      }
+      if (!outLoc[code]) missing.push(code);
     }
     if (missing.length) {
       setRowNote(meta.uiRow, 1, `Отсутствуют языки: ${missing.join(', ')}`);
       throw new Error(`label "${label}": API не вернул переводы для: ${missing.join(', ')}`);
     }
+    normalized.push({ label, localization: outLoc, uiRow: meta.uiRow });
   }
 
-  return resp.data;
+  return normalized;
 }
 
 /** ===================== WRITE BACK ===================== **/
@@ -275,7 +313,7 @@ function writeBackBuffers(sheet, langsAll, buffers, numRows) {
         out[i] = [cur];
       }
     }
-    if (hasAny) rng.setValues(out);
+  if (hasAny) rng.setValues(out);
   }
 }
 

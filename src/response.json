@@ -1,0 +1,34 @@
+{
+  "data": [
+    {
+      "label": "title",
+      "localization": {
+        "es": {
+          "text": "Doctorina"
+        },
+        "de": {
+          "text": "Doctorina"
+        }
+      }
+    },
+    {
+      "label": "checkVersionUpdateNowButton",
+      "localization": {
+        "ru": {
+          "text": "Обновить сейчас"
+        }
+      }
+    },
+    {
+      "label": "checkVersionUpdateOptionalText",
+      "localization": {
+        "es": {
+          "text": "Una nueva versión (v{version}) de la aplicación está disponible. Por favor, actualiza para continuar y obtener la mejor experiencia."
+        },
+        "de": {
+          "text": "Eine neue Version (v{version}) der App ist verfügbar. Bitte aktualisieren Sie, um fortzufahren und das beste Erlebnis zu erhalten."
+        }
+      }
+    }
+  ]
+}

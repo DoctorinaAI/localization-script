@@ -1,0 +1,32 @@
+{
+  "batch": [
+    {
+      "label": "title",
+      "description": "",
+      "meta": {},
+      "en": "Doctorina",
+      "languages": ["es", "de"]
+    },
+    {
+      "label": "checkVersionUpdateNowButton",
+      "description": "Кнопка обновиться",
+      "meta": {},
+      "en": "Update Now",
+      "languages": ["ru"]
+    },
+    {
+      "label": "checkVersionUpdateOptionalText",
+      "description": "Сообщение о доступности новой версии \nприложения с приглашением обновиться",
+      "meta": {
+        "placeholders": {
+          "version": {
+            "type": "String",
+            "example": "2.3.1"
+          }
+        }
+      },
+      "en": "A new version (v{version}) of the app is available. Please update to continue for the best experience.",
+      "languages": ["es", "de"]
+    }
+  ]
+}
