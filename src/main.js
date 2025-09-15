@@ -8,6 +8,7 @@ const DEFAULTS = {
   RETRY_DELAY_MS: "1000",
   HIGHLIGHT_COLOR: "220,255,220",
   DRY_RUN: "false",
+  HIGHLIGHT_CLEAR_MINUTES: "1", // 0 = do not auto clear
 };
 
 /** ===================== MENU ===================== **/
@@ -19,6 +20,8 @@ function onOpen() {
     .addItem("Fill GOOGLETRANSLATE formulas", "fillGoogleTranslateFormulas")
     .addItem("Freeze GOOGLETRANSLATE formulas", "freezeGoogleTranslateFormulas")
     .addItem("Clear GOOGLETRANSLATE formulas", "clearGoogleTranslateFormulas")
+    .addSeparator()
+    .addItem("Clear translation highlight now", "clearLocalizationHighlight")
     .addToUi();
 }
 
@@ -151,6 +154,9 @@ function runLocalization() {
   let written = 0;
   if (!config.dryRun) {
     written = writeBackBuffers(sheet, langsAll, buffers, numRows, config);
+    if (written > 0 && config.highlightClearMinutes > 0) {
+      scheduleHighlightClear(config.highlightClearMinutes);
+    }
   }
   const finished = new Date();
   const msg = `Localization: rows=${batch.length}; cells=${written}; batches=${Math.ceil(batch.length / config.batchSize)}; time=${finished - started}ms${config.dryRun ? " (DRY RUN)" : ""}`;
@@ -253,6 +259,11 @@ function getConfig() {
     props.getProperty("HIGHLIGHT_COLOR") || DEFAULTS.HIGHLIGHT_COLOR;
   const DRY_RUN =
     (props.getProperty("DRY_RUN") || DEFAULTS.DRY_RUN).toLowerCase() === "true";
+  const HIGHLIGHT_CLEAR_MINUTES = parseInt(
+    props.getProperty("HIGHLIGHT_CLEAR_MINUTES") ||
+      DEFAULTS.HIGHLIGHT_CLEAR_MINUTES,
+    10
+  );
   const batchSize = isFinite(BATCH_SIZE) && BATCH_SIZE > 0 ? BATCH_SIZE : 3;
   return {
     API_URL,
@@ -264,6 +275,9 @@ function getConfig() {
     retryDelay: isFinite(RETRY_DELAY_MS) ? RETRY_DELAY_MS : 1000,
     highlightRGB: HIGHLIGHT_COLOR,
     dryRun: DRY_RUN,
+    highlightClearMinutes: isFinite(HIGHLIGHT_CLEAR_MINUTES)
+      ? HIGHLIGHT_CLEAR_MINUTES
+      : 0,
   };
 }
 
@@ -420,6 +434,12 @@ function parseRGB(str) {
 }
 function clamp(n) {
   return Math.max(0, Math.min(255, n));
+}
+
+function rgbToHex(rgb) {
+  if (!rgb) return null;
+  const toHex = (n) => n.toString(16).padStart(2, "0");
+  return `#${toHex(rgb.r)}${toHex(rgb.g)}${toHex(rgb.b)}`.toLowerCase();
 }
 
 /** ===================== STATUS ===================== **/
@@ -592,5 +612,71 @@ function clearGoogleTranslateFormulas() {
     `Cleared ${cleared} GOOGLETRANSLATE formulas`,
     "Clear",
     6
+  );
+}
+
+function clearLocalizationHighlight() {
+  const config = getConfig();
+  const highlightRGB = parseRGB(config.highlightRGB);
+  if (!highlightRGB) {
+    SpreadsheetApp.getActive().toast(
+      "No valid highlight color set",
+      "Highlight",
+      5
+    );
+    return;
+  }
+  const targetHex = rgbToHex(highlightRGB);
+  const { sheet, values } = readActiveSheet();
+  if (!values || values.length < 2) return;
+  const header = values[0].map((h) => String(h || "").trim());
+  const idx = indexHeader(header);
+  const langsAll = detectLanguageColumns(header, idx.afterEnCol);
+  if (!langsAll.length) return;
+  const numRows = values.length - 1;
+  let clearedAny = 0;
+  for (const l of langsAll) {
+    const col = l.colIndex + 1;
+    const rng = sheet.getRange(2, col, numRows, 1);
+    const bgs = rng.getBackgrounds();
+    let changed = false;
+    for (let r = 0; r < numRows; r++) {
+      const cur = (bgs[r][0] || "").toLowerCase();
+      if (cur === targetHex) {
+        bgs[r][0] = null; // reset
+        changed = true;
+        clearedAny++;
+      }
+    }
+    if (changed) rng.setBackgrounds(bgs);
+  }
+  SpreadsheetApp.getActive().toast(
+    `Highlight cleared from ${clearedAny} cells`,
+    "Highlight",
+    5
+  );
+}
+
+function scheduleHighlightClear(minutes) {
+  // Remove previous scheduled clears to avoid piling up
+  const triggers = ScriptApp.getProjectTriggers();
+  for (const t of triggers) {
+    if (
+      t.getHandlerFunction &&
+      t.getHandlerFunction() === "clearLocalizationHighlight"
+    ) {
+      try {
+        ScriptApp.deleteTrigger(t);
+      } catch (e) {}
+    }
+  }
+  ScriptApp.newTrigger("clearLocalizationHighlight")
+    .timeBased()
+    .after(minutes * 60 * 1000)
+    .create();
+  SpreadsheetApp.getActive().toast(
+    `Highlight will clear in ${minutes} min`,
+    "Highlight",
+    5
   );
 }
