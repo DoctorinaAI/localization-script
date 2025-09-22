@@ -66,13 +66,11 @@ function runLocalization() {
 
     if (seenLabels.has(label)) {
       setRowNote(uiRow, 1, `Duplicate label: "${label}". Must be unique.`);
-      throw new Error(
-        `Duplicate label found: "${label}" (row ${uiRow}).`
-      );
+      throw new Error(`Duplicate label found: "${label}" (row ${uiRow}).`);
     }
     seenLabels.add(label);
 
-  // Even with OVERWRITE=true request ONLY empty cells to avoid wasting quota
+    // Even with OVERWRITE=true request ONLY empty cells to avoid wasting quota
     const targets = pickEmptyTargetsForRow(sheet, uiRow, langsAll);
     if (targets.codes.length === 0) continue;
 
@@ -101,13 +99,15 @@ function runLocalization() {
     return;
   }
 
-  // Split into batches by config.batchSize
-  const allData = [];
+  let totalWritten = 0;
   const batchesTotal = Math.ceil(batch.length / config.batchSize);
+
   for (let i = 0; i < batch.length; i += config.batchSize) {
     const slice = batch.slice(i, i + config.batchSize);
     const batchNum = Math.floor(i / config.batchSize) + 1;
-  setStatus(config, `Batch ${batchNum}/${batchesTotal}`);
+
+    setStatus(config, `Batch ${batchNum}/${batchesTotal}`);
+
     let resp;
     if (config.dryRun) {
       resp = {
@@ -121,47 +121,28 @@ function runLocalization() {
     } else {
       resp = callApiBatchWithRetry(config, { batch: slice });
     }
-    const dataPart = validateBatchResponse(resp, byLabel, { slice });
-    allData.push(...dataPart);
+
+    const normalized = validateBatchResponse(resp, byLabel, { slice });
+
+    const writtenNow = config.dryRun
+      ? 0
+      : writeBackSliceImmediate(sheet, normalized, byLabel, config);
+
+    totalWritten += writtenNow;
+
     SpreadsheetApp.getActive().toast(
-      `Batch ${batchNum}/${batchesTotal} OK`,
+      `Batch ${batchNum}/${batchesTotal} OK${writtenNow ? `, written ${writtenNow}` : ""}`,
       "Progress",
       3
     );
   }
-  const data = allData;
 
-  // Prepare column write buffers
-  const numRows = rowsEffective.length;
-  const buffers = Object.fromEntries(
-    langsAll.map((l) => [l.code, new Array(numRows).fill(null)])
-  );
-
-  for (const item of data) {
-    const info = byLabel.get(item.label);
-    if (!info) continue;
-    const loc = item.localization || {};
-    for (const code of info.requestedCodes) {
-      const val = loc[code];
-      let text = "";
-      if (val && typeof val === "object" && typeof val.text !== "undefined") {
-        text = safeStr(val.text);
-      } else {
-        text = safeStr(val);
-      }
-      buffers[code][info.uiRow - 1 - uiOffset] = text;
-    }
+  if (totalWritten > 0 && config.highlightClearMinutes > 0) {
+    scheduleHighlightClear(config.highlightClearMinutes);
   }
 
-  let written = 0;
-  if (!config.dryRun) {
-    written = writeBackBuffers(sheet, langsAll, buffers, numRows, config);
-    if (written > 0 && config.highlightClearMinutes > 0) {
-      scheduleHighlightClear(config.highlightClearMinutes);
-    }
-  }
   const finished = new Date();
-  const msg = `Localization: rows=${batch.length}; cells=${written}; batches=${Math.ceil(batch.length / config.batchSize)}; time=${finished - started}ms${config.dryRun ? " (DRY RUN)" : ""}`;
+  const msg = `Localization: rows=${batch.length}; cells=${totalWritten}; batches=${Math.ceil(batch.length / config.batchSize)}; time=${finished - started}ms${config.dryRun ? " (DRY RUN)" : ""}`;
   setStatus(config, msg);
   SpreadsheetApp.getActive().toast(msg, "OK", 8);
   // logging removed
@@ -173,8 +154,7 @@ function indexHeader(header) {
   const map = {};
   for (const k of req) {
     const pos = header.findIndex((h) => h.toLowerCase() === k);
-    if (pos < 0)
-      throw new Error(`Required header column is missing: "${k}".`);
+    if (pos < 0) throw new Error(`Required header column is missing: "${k}".`);
     map[k] = pos;
   }
   map.afterEnCol = map.en + 1;
@@ -198,8 +178,8 @@ function detectLanguageColumns(header, startFrom) {
 function detectEffectiveDataRowCount(rows, labelColIndex) {
   for (let i = 0; i < rows.length; i++) {
     const label = rows[i][labelColIndex];
-    if (!label || String(label).trim() === '') {
-  return i; // until first empty label
+    if (!label || String(label).trim() === "") {
+      return i; // until first empty label
     }
   }
   return rows.length;
@@ -322,7 +302,7 @@ function callApiBatch(config, payload) {
   try {
     data = JSON.parse(resp.getContentText());
   } catch (_e) {
-  throw new Error("API returned non-JSON response.");
+    throw new Error("API returned non-JSON response.");
   }
   return data;
 }
@@ -346,7 +326,7 @@ function callApiBatchWithRetry(config, payload) {
 
 function validateBatchResponse(resp, byLabel, ctx) {
   if (!resp || typeof resp !== "object" || !Array.isArray(resp.data)) {
-  throw new Error(`Response object missing array \"data\".`);
+    throw new Error(`Response object missing array \"data\".`);
   }
 
   const normalized = [];
@@ -356,7 +336,7 @@ function validateBatchResponse(resp, byLabel, ctx) {
     const label = safeStr(item.label);
     if (!label) continue;
     if (serverByLabel.has(label)) {
-    throw new Error(`Response contains duplicate label "${label}".`);
+      throw new Error(`Response contains duplicate label "${label}".`);
     }
     serverByLabel.set(label, item);
   }
@@ -399,6 +379,41 @@ function validateBatchResponse(resp, byLabel, ctx) {
 }
 
 /** ===================== WRITE BACK ===================== **/
+function writeBackSliceImmediate(sheet, normalizedItems, byLabel, config) {
+  if (!normalizedItems || !normalizedItems.length) return 0;
+  const color = parseRGB(config.highlightRGB);
+  let written = 0;
+
+  for (const item of normalizedItems) {
+    const info = byLabel.get(item.label);
+    if (!info) continue;
+
+    const loc = item.localization || {};
+    for (const code of Object.keys(loc)) {
+      // записываем только то, что изначально запрашивали
+      if (!info.requestedCodes.has(code)) continue;
+
+      const target = info.targets.find((t) => t.code === code);
+      if (!target) continue;
+
+      const uiRow = info.uiRow; // уже 1-based
+      const col = target.colIndex + 1; // в A1 это 1-based
+      const cell = sheet.getRange(uiRow, col);
+
+      const cur = safeStr(cell.getValue());
+      if (cur !== "") continue; // кто-то уже заполнил
+
+      const next = safeStr(loc[code]);
+      if (!next) continue;
+
+      cell.setValue(next);
+      if (color) cell.setBackgroundRGB(color.r, color.g, color.b);
+      written++;
+    }
+  }
+  return written;
+}
+
 function writeBackBuffers(sheet, langsAll, buffers, numRows, config) {
   let written = 0;
   const color = parseRGB(config.highlightRGB);
@@ -516,7 +531,7 @@ function fillGoogleTranslateFormulas() {
     const vals = rng.getValues();
     const formulasExisting = rng.getFormulas();
     const targetCode = l.code.split(/[_-]/)[0]; // ru_RU -> ru
-  for (let i = 0; i < numRows; i++) {
+    for (let i = 0; i < numRows; i++) {
       const existingFormula = formulasExisting[i][0];
       if (existingFormula) continue; // уже формула
       const v = safeStr(vals[i][0]);
@@ -610,7 +625,11 @@ function clearGoogleTranslateFormulas() {
       }
     }
   }
-  SpreadsheetApp.getActive().toast(`Cleared ${cleared} GOOGLETRANSLATE formulas`, "Clear", 6);
+  SpreadsheetApp.getActive().toast(
+    `Cleared ${cleared} GOOGLETRANSLATE formulas`,
+    "Clear",
+    6
+  );
 }
 
 function clearLocalizationHighlight() {
